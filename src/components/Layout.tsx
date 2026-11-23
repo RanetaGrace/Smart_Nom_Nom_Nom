@@ -1,47 +1,51 @@
 import { NavLink, Outlet } from 'react-router-dom';
 
 const navItems = [
-  { to: '/', label: 'Home', end: true },
-  { to: '/recipes', label: 'Recipes' },
-  { to: '/inventory', label: 'Inventory' },
-  { to: '/grocery', label: 'Grocery' },
-  { to: '/meal-plan', label: 'Meal Plan' },
+  { to: '/', label: 'Home', icon: '🏠', end: true },
+  { to: '/recipes', label: 'Recipes', icon: '📖' },
+  { to: '/inventory', label: 'Inventory', icon: '📦' },
+  { to: '/grocery', label: 'Grocery', icon: '🛒' },
+  { to: '/meal-plan', label: 'Plan', icon: '📅' },
 ];
 
 export function Layout() {
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
+    <div className="app-shell">
       {/* Header */}
-      <header className="bg-white border-b border-slate-200 sticky top-0 z-20">
-        <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between">
+      <header className="app-header">
+        <div className="px-4 py-3 flex items-center justify-between">
           <h1 className="text-lg font-semibold text-slate-800 tracking-tight">
-            Meal Planner <span className="text-xs font-normal text-slate-400">ALPHA 1.0</span>
+            Nom Noms
           </h1>
+          <span className="text-[10px] font-medium text-slate-400 uppercase tracking-wider">
+            Alpha 2.0
+          </span>
         </div>
       </header>
 
-      {/* Main content */}
-      <main className="flex-1 max-w-5xl w-full mx-auto px-4 py-6 pb-24">
-        <Outlet />
+      {/* Scrollable main content */}
+      <main className="app-main">
+        <div className="px-4 py-4 pb-6 max-w-lg mx-auto w-full">
+          <Outlet />
+        </div>
       </main>
 
-      {/* Bottom navigation (mobile-first) */}
-      <nav className="fixed bottom-0 inset-x-0 bg-white border-t border-slate-200 z-20">
-        <div className="max-w-5xl mx-auto flex justify-around">
+      {/* Bottom navigation – larger touch targets */}
+      <nav className="app-nav">
+        <div className="flex">
           {navItems.map((item) => (
             <NavLink
               key={item.to}
               to={item.to}
               end={item.end}
               className={({ isActive }) =>
-                `flex-1 py-3 text-center text-sm font-medium transition-colors ${
-                  isActive
-                    ? 'text-emerald-600 border-t-2 border-emerald-600 -mt-px'
-                    : 'text-slate-500 hover:text-slate-800'
-                }`
+                `nav-item flex-1 ${isActive ? 'active' : ''}`
               }
             >
-              {item.label}
+              <span className="nav-icon" aria-hidden>
+                {item.icon}
+              </span>
+              <span>{item.label}</span>
             </NavLink>
           ))}
         </div>
