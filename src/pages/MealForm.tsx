@@ -2,11 +2,18 @@ import { useEffect, useState } from 'react';
 import { useNavigate, useSearchParams, useParams } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db, nextId } from '../db';
-import type { PlannedMeal, PlannedIngredient, Ingredient, MealType } from '../types';
+import type { PlannedMeal, PlannedIngredient, Ingredient, MealType, InventoryBatch } from '../types';
 import { COMMON_UNITS, INGREDIENT_TYPES, MEAL_TYPE_LABELS } from '../types';
 import { IngredientSelect } from '../components/IngredientSelect';
+import { formatQuantity, convertQuantity } from '../utils/units';
 
-type FormIngredient = PlannedIngredient & { tempId: string };
+type FormIngredient = PlannedIngredient & {
+  tempId: string;
+  displayName?: string;
+  fromBatchId?: string;
+  availableQty?: number;
+  availableUnit?: string;
+};
 
 export function MealForm() {
   const { id } = useParams();
@@ -20,6 +27,7 @@ export function MealForm() {
   );
   const recipes = useLiveQuery(() => db.recipes.orderBy('name').toArray(), []);
   const allIngredients = useLiveQuery(() => db.ingredients.orderBy('name').toArray(), []);
+  const batches = useLiveQuery(() => db.inventoryBatches.toArray(), []);
 
   const prefilledDate = searchParams.get('date') || new Date().toISOString().slice(0, 10);
 
@@ -34,8 +42,8 @@ export function MealForm() {
   const [notesOpen, setNotesOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
+  const [showPickInventory, setShowPickInventory] = useState(false);
 
-  // Inline new ingredient
   const [showNewIngredient, setShowNewIngredient] = useState(false);
   const [newIng, setNewIng] = useState({
     name: '',
@@ -44,6 +52,8 @@ export function MealForm() {
     subcategory: '',
     preferredUnit: 'g',
   });
+
+  const ingredientMap = new Map((allIngredients ?? []).map((i) => [i.id, i]));
 
   useEffect(() => {
     if (existing) {
@@ -56,6 +66,7 @@ export function MealForm() {
         existing.ingredients.map((ing, i) => ({
           ...ing,
           tempId: `existing-${i}`,
+          displayName: ingredientMap.get(ing.ingredientId)?.name,
         }))
       );
       setNotes(existing.notes || '');
@@ -63,6 +74,11 @@ export function MealForm() {
       setMode(existing.recipeId ? 'recipe' : 'freetext');
     }
   }, [existing]);
+
+  function batchLabel(b: InventoryBatch): string {
+    if (b.freeTextName) return b.freeTextName;
+    return ingredientMap.get(b.ingredientId || '')?.name ?? 'Unknown';
+  }
 
   function handleSelectRecipe(rid: string) {
     setRecipeId(rid);
@@ -74,6 +90,7 @@ export function MealForm() {
         recipe.ingredients.map((ing, i) => ({
           ...ing,
           tempId: `from-recipe-${i}`,
+          displayName: ingredientMap.get(ing.ingredientId)?.name,
         }))
       );
     }
@@ -100,6 +117,52 @@ export function MealForm() {
 
   function removeIngredientRow(tempId: string) {
     setIngredients((prev) => prev.filter((row) => row.tempId !== tempId));
+  }
+
+  function addFromInventory(batch: InventoryBatch) {
+    const name = batchLabel(batch);
+    // For free-text batches without ingredientId, use a placeholder id pattern
+    // PlannedIngredient requires ingredientId — for free-text we still need an id.
+    // Use empty and store name in note/display; on save we'll create or skip formal id.
+    // Better: if free-text, ensure we have a way. For planned meals, ingredientId is required
+    // in type. We'll use ingredientId if present; for free-text create a synthetic note.
+    setIngredients((prev) => [
+      ...prev,
+      {
+        tempId: crypto.randomUUID(),
+        ingredientId: batch.ingredientId || `inventory:${batch.id}`,
+        quantity: batch.quantity,
+        unit: batch.unit,
+        note: batch.freeTextName ? `From inventory: ${batch.freeTextName}` : 'From inventory',
+        displayName: name,
+        fromBatchId: batch.id,
+        availableQty: batch.quantity,
+        availableUnit: batch.unit,
+      },
+    ]);
+    setShowPickInventory(false);
+    setError('');
+  }
+
+  function checkInventoryOverages(): string | null {
+    for (const row of ingredients) {
+      if (!row.fromBatchId || row.availableQty == null) continue;
+      const qty = Number(row.quantity) || 0;
+      if (row.unit === row.availableUnit) {
+        if (qty > row.availableQty + 0.0001) {
+          return `"${row.displayName || 'Item'}" needs ${formatQuantity(qty, row.unit)} but inventory only has ${formatQuantity(row.availableQty, row.availableUnit)}.`;
+        }
+      } else {
+        const neededInAvailable = convertQuantity(qty, row.unit, row.availableUnit!);
+        if (neededInAvailable !== null && neededInAvailable > row.availableQty + 0.0001) {
+          return `"${row.displayName || 'Item'}" needs ${formatQuantity(qty, row.unit)} but inventory only has ${formatQuantity(row.availableQty, row.availableUnit!)}.`;
+        }
+        if (neededInAvailable === null && qty > row.availableQty) {
+          return `"${row.displayName || 'Item'}": quantity may exceed inventory (units differ). Available: ${formatQuantity(row.availableQty, row.availableUnit!)}.`;
+        }
+      }
+    }
+    return null;
   }
 
   async function handleCreateIngredient() {
@@ -130,6 +193,7 @@ export function MealForm() {
         quantity: 1,
         unit: newIng.preferredUnit || 'g',
         note: '',
+        displayName: ingredient.name,
       },
     ]);
 
@@ -146,14 +210,28 @@ export function MealForm() {
       setError('Title is required');
       return;
     }
+
+    // Validate inventory overages
+    const overage = checkInventoryOverages();
+    if (overage) {
+      setError(overage);
+      return;
+    }
+
+    // Rows must have ingredientId (or inventory-linked)
     if (ingredients.some((ing) => !ing.ingredientId)) {
-      setError('Every ingredient row must select an ingredient');
+      setError('Every ingredient row must select an ingredient or come from inventory');
       return;
     }
 
     setSaving(true);
     try {
       const now = new Date().toISOString();
+
+      // For inventory free-text items (ingredientId starts with inventory:),
+      // we keep the synthetic id in the planned meal for reference; grocery
+      // calculation already handles known ingredient IDs. Free-text inventory
+      // links are mainly for your planning + overage alerts.
       const plannedIngredients: PlannedIngredient[] = ingredients.map(
         ({ ingredientId, quantity, unit, note }) => ({
           ingredientId,
@@ -196,17 +274,15 @@ export function MealForm() {
     return <p className="text-slate-500">Loading...</p>;
   }
 
+  const availableBatches = (batches ?? []).filter((b) => b.quantity > 0);
+
   return (
     <div className="space-y-5">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-semibold text-slate-800">
           {isEdit ? 'Edit Meal' : 'Add Meal'}
         </h2>
-        <button
-          type="button"
-          onClick={() => navigate('/meal-plan')}
-          className="text-sm text-slate-500"
-        >
+        <button type="button" onClick={() => navigate('/meal-plan')} className="text-sm text-slate-500">
           Cancel
         </button>
       </div>
@@ -218,14 +294,14 @@ export function MealForm() {
       )}
 
       <form onSubmit={handleSubmit} className="space-y-4">
-        <section className="bg-white p-4 rounded-xl border border-slate-200 space-y-4">
+        <section className="bg-white p-4 rounded-xl border border-slate-200 space-y-4 overflow-hidden">
           <div>
             <label className="block text-sm font-medium text-slate-700 mb-1">Date</label>
             <input
               type="date"
               value={date}
               onChange={(e) => setDate(e.target.value)}
-              className="w-full px-3 py-2.5 border border-slate-300 rounded-lg text-sm"
+              className="w-full max-w-full px-3 py-2.5 border border-slate-300 rounded-lg text-sm box-border"
               required
             />
           </div>
@@ -272,9 +348,7 @@ export function MealForm() {
               >
                 <option value="">Select a recipe…</option>
                 {(recipes ?? []).map((r) => (
-                  <option key={r.id} value={r.id}>
-                    {r.name}
-                  </option>
+                  <option key={r.id} value={r.id}>{r.name}</option>
                 ))}
               </select>
             </div>
@@ -287,7 +361,7 @@ export function MealForm() {
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               className="w-full px-3 py-2.5 border border-slate-300 rounded-lg text-sm"
-              placeholder="e.g. Chicken Curry or Eggs & Toast"
+              placeholder="e.g. Chicken Curry or Leftover lentils"
               required
             />
           </div>
@@ -297,9 +371,10 @@ export function MealForm() {
               <label className="block text-sm font-medium text-slate-700 mb-1">Servings</label>
               <input
                 type="number"
-                min="1"
+                min={1}
+                step={1}
                 value={servings}
-                onChange={(e) => setServings(Number(e.target.value))}
+                onChange={(e) => setServings(Number(e.target.value) || 1)}
                 className="w-full px-3 py-2.5 border border-slate-300 rounded-lg text-sm"
               />
             </div>
@@ -312,9 +387,7 @@ export function MealForm() {
               >
                 <option value="">Optional</option>
                 {Object.entries(MEAL_TYPE_LABELS).map(([code, label]) => (
-                  <option key={code} value={code}>
-                    {code} – {label}
-                  </option>
+                  <option key={code} value={code}>{code} – {label}</option>
                 ))}
               </select>
             </div>
@@ -323,34 +396,58 @@ export function MealForm() {
 
         {/* Ingredients */}
         <section className="bg-white p-4 rounded-xl border border-slate-200 space-y-3">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between flex-wrap gap-2">
             <h3 className="font-medium text-slate-800">Ingredients</h3>
-            <div className="flex gap-3">
-              <button
-                type="button"
-                onClick={() => setShowNewIngredient(true)}
-                className="text-sm text-emerald-600 font-medium"
-              >
+            <div className="flex flex-wrap gap-3">
+              <button type="button" onClick={() => setShowPickInventory(true)} className="text-sm text-emerald-600 font-medium">
+                + From inventory
+              </button>
+              <button type="button" onClick={() => setShowNewIngredient(true)} className="text-sm text-emerald-600 font-medium">
                 + New
               </button>
-              <button
-                type="button"
-                onClick={addIngredientRow}
-                className="text-sm text-emerald-600 font-medium"
-              >
+              <button type="button" onClick={addIngredientRow} className="text-sm text-emerald-600 font-medium">
                 + Row
               </button>
             </div>
           </div>
           <p className="text-xs text-slate-500">
-            Changes only affect this meal, not the original recipe.
+            Add from your ingredient list or from current inventory (including leftovers).
           </p>
+
+          {showPickInventory && (
+            <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+              <div className="text-sm font-medium text-slate-800">Pick from inventory</div>
+              {availableBatches.length === 0 ? (
+                <p className="text-sm text-slate-500">Nothing in inventory with quantity &gt; 0.</p>
+              ) : (
+                <ul className="max-h-48 overflow-y-auto space-y-1">
+                  {availableBatches.map((b) => (
+                    <li key={b.id}>
+                      <button
+                        type="button"
+                        onClick={() => addFromInventory(b)}
+                        className="w-full text-left px-2 py-2 text-sm rounded-lg hover:bg-emerald-50"
+                      >
+                        <span className="font-medium">{batchLabel(b)}</span>
+                        <span className="text-slate-500 ml-1">
+                          {formatQuantity(b.quantity, b.unit)} · {b.location}
+                        </span>
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <button type="button" onClick={() => setShowPickInventory(false)} className="text-sm text-slate-500">
+                Cancel
+              </button>
+            </div>
+          )}
 
           {showNewIngredient && (
             <div className="p-3 bg-slate-50 rounded-lg border border-slate-200 space-y-2">
               <div className="text-sm font-medium text-slate-700">New ingredient</div>
               <p className="text-[11px] text-slate-500 leading-snug">
-                Type = broad group (Meat and Poultry). Family = the food (Chicken). Subcategory = form (Breast).
+                Type = broad group · Family = the food · Subcategory = form
               </p>
               <input
                 type="text"
@@ -377,24 +474,6 @@ export function MealForm() {
                   className="px-3 py-2 border border-slate-300 rounded-lg text-sm"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-2">
-                <input
-                  type="text"
-                  placeholder="Subcategory (optional)"
-                  value={newIng.subcategory}
-                  onChange={(e) => setNewIng((n) => ({ ...n, subcategory: e.target.value }))}
-                  className="px-3 py-2 border border-slate-300 rounded-lg text-sm"
-                />
-                <select
-                  value={newIng.preferredUnit}
-                  onChange={(e) => setNewIng((n) => ({ ...n, preferredUnit: e.target.value }))}
-                  className="px-3 py-2 border border-slate-300 rounded-lg text-sm"
-                >
-                  {COMMON_UNITS.map((u) => (
-                    <option key={u} value={u}>{u}</option>
-                  ))}
-                </select>
-              </div>
               <div className="flex gap-2">
                 <button type="button" onClick={handleCreateIngredient} className="px-3 py-1.5 bg-emerald-600 text-white text-sm rounded-lg">
                   Save
@@ -412,15 +491,26 @@ export function MealForm() {
 
           <div className="space-y-2">
             {ingredients.map((row) => (
-              <div key={row.tempId} className="flex flex-wrap gap-2 items-center">
-                <div className="flex-1 min-w-[120px]">
-                  <IngredientSelect
-                    ingredients={allIngredients ?? []}
-                    value={row.ingredientId}
-                    onChange={(id) => updateIngredientRow(row.tempId, 'ingredientId', id)}
-                    placeholder="Type to search…"
-                  />
-                </div>
+              <div key={row.tempId} className="flex flex-wrap gap-2 items-start">
+                {row.fromBatchId ? (
+                  <div className="flex-1 min-w-[120px] px-2.5 py-2 bg-emerald-50 border border-emerald-200 rounded-lg text-sm">
+                    {row.displayName || 'Inventory item'}
+                    {row.availableQty != null && (
+                      <span className="text-xs text-slate-500 ml-1">
+                        (have {formatQuantity(row.availableQty, row.availableUnit || row.unit)})
+                      </span>
+                    )}
+                  </div>
+                ) : (
+                  <div className="flex-1 min-w-[120px]">
+                    <IngredientSelect
+                      ingredients={allIngredients ?? []}
+                      value={row.ingredientId.startsWith('inventory:') ? '' : row.ingredientId}
+                      onChange={(id) => updateIngredientRow(row.tempId, 'ingredientId', id)}
+                      placeholder="Type to search…"
+                    />
+                  </div>
+                )}
                 <input
                   type="number"
                   step="any"
@@ -432,7 +522,7 @@ export function MealForm() {
                 <select
                   value={row.unit}
                   onChange={(e) => updateIngredientRow(row.tempId, 'unit', e.target.value)}
-                  className="w-20 px-2 py-2 border border-slate-300 rounded-lg text-sm"
+                  className="w-24 px-2 py-2 border border-slate-300 rounded-lg text-sm"
                 >
                   {COMMON_UNITS.map((u) => (
                     <option key={u} value={u}>{u}</option>
@@ -450,7 +540,6 @@ export function MealForm() {
           </div>
         </section>
 
-        {/* Notes – expandable */}
         <section className="bg-white rounded-xl border border-slate-200 overflow-hidden">
           <button
             type="button"
@@ -467,7 +556,7 @@ export function MealForm() {
                 onChange={(e) => setNotes(e.target.value)}
                 rows={3}
                 className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
-                placeholder="Event, special instructions, who it's for…"
+                placeholder="Event, special instructions…"
               />
             </div>
           )}
@@ -476,7 +565,7 @@ export function MealForm() {
         <button
           type="submit"
           disabled={saving}
-          className="w-full py-3.5 bg-emerald-600 text-white font-medium rounded-xl hover:bg-emerald-700 disabled:opacity-50"
+          className="w-full py-3.5 bg-emerald-600 text-white font-medium rounded-xl disabled:opacity-50"
         >
           {saving ? 'Saving…' : isEdit ? 'Update Meal' : 'Add to Meal Plan'}
         </button>
