@@ -10,6 +10,8 @@ import { Grocery } from './pages/Grocery';
 import { MealPlan } from './pages/MealPlan';
 import { MealForm } from './pages/MealForm';
 import { MealDetail } from './pages/MealDetail';
+import { Settings } from './pages/Settings';
+import { IngredientsManager } from './pages/IngredientsManager';
 
 export default function App() {
   return (
@@ -29,6 +31,8 @@ export default function App() {
           <Route path="meal-plan/add" element={<MealForm />} />
           <Route path="meal-plan/:id" element={<MealDetail />} />
           <Route path="meal-plan/:id/edit" element={<MealForm />} />
+          <Route path="settings" element={<Settings />} />
+          <Route path="settings/ingredients" element={<IngredientsManager />} />
         </Route>
       </Routes>
     </BrowserRouter>
