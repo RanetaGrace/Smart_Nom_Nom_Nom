@@ -4,6 +4,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db, nextId } from '../db';
 import type { InventoryBatch, Expiration, Ingredient } from '../types';
 import { COMMON_UNITS, STORAGE_LOCATIONS, INGREDIENT_TYPES } from '../types';
+import { IngredientSelect } from '../components/IngredientSelect';
 
 export function InventoryForm() {
   const { id } = useParams();
@@ -191,17 +192,12 @@ export function InventoryForm() {
                   + New
                 </button>
               </div>
-              <select
+              <IngredientSelect
+                ingredients={allIngredients ?? []}
                 value={ingredientId}
-                onChange={(e) => setIngredientId(e.target.value)}
-                className="w-full px-3 py-2.5 border border-slate-300 rounded-lg text-sm"
-                required={mode === 'ingredient'}
-              >
-                <option value="">Select…</option>
-                {(allIngredients ?? []).map((ing) => (
-                  <option key={ing.id} value={ing.id}>{ing.name}</option>
-                ))}
-              </select>
+                onChange={setIngredientId}
+                placeholder="Type to search…"
+              />
             </div>
           ) : (
             <div>

@@ -4,6 +4,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db, nextId } from '../db';
 import type { Recipe, RecipeIngredient, Ingredient } from '../types';
 import { COMMON_UNITS, INGREDIENT_TYPES } from '../types';
+import { IngredientSelect } from '../components/IngredientSelect';
 
 type FormIngredient = RecipeIngredient & { tempId: string };
 
@@ -261,19 +262,12 @@ export function RecipeForm() {
             <label className="block text-sm font-medium text-slate-700 mb-1">
               Primary Ingredient *
             </label>
-            <select
+            <IngredientSelect
+              ingredients={allIngredients ?? []}
               value={form.primaryIngredientId}
-              onChange={(e) => updateField('primaryIngredientId', e.target.value)}
-              className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-500"
-              required
-            >
-              <option value="">Select primary ingredient…</option>
-              {(allIngredients ?? []).map((ing) => (
-                <option key={ing.id} value={ing.id}>
-                  {ing.name}
-                </option>
-              ))}
-            </select>
+              onChange={(id) => updateField('primaryIngredientId', id)}
+              placeholder="Type to search…"
+            />
             <p className="mt-1 text-xs text-slate-500">
               Don’t see it? Add it below in the ingredients section first.
             </p>
@@ -473,18 +467,14 @@ export function RecipeForm() {
           <div className="space-y-3">
             {ingredients.map((row) => (
               <div key={row.tempId} className="flex flex-wrap gap-2 items-start">
-                <select
-                  value={row.ingredientId}
-                  onChange={(e) => updateIngredientRow(row.tempId, 'ingredientId', e.target.value)}
-                  className="flex-1 min-w-[140px] px-3 py-2 border border-slate-300 rounded-lg text-sm"
-                >
-                  <option value="">Select…</option>
-                  {(allIngredients ?? []).map((ing) => (
-                    <option key={ing.id} value={ing.id}>
-                      {ing.name}
-                    </option>
-                  ))}
-                </select>
+                <div className="flex-1 min-w-[140px]">
+                  <IngredientSelect
+                    ingredients={allIngredients ?? []}
+                    value={row.ingredientId}
+                    onChange={(id) => updateIngredientRow(row.tempId, 'ingredientId', id)}
+                    placeholder="Type to search…"
+                  />
+                </div>
                 <input
                   type="number"
                   step="any"

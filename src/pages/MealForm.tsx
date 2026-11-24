@@ -4,6 +4,7 @@ import { useLiveQuery } from 'dexie-react-hooks';
 import { db, nextId } from '../db';
 import type { PlannedMeal, PlannedIngredient, Ingredient, MealType } from '../types';
 import { COMMON_UNITS, INGREDIENT_TYPES, MEAL_TYPE_LABELS } from '../types';
+import { IngredientSelect } from '../components/IngredientSelect';
 
 type FormIngredient = PlannedIngredient & { tempId: string };
 
@@ -412,16 +413,14 @@ export function MealForm() {
           <div className="space-y-2">
             {ingredients.map((row) => (
               <div key={row.tempId} className="flex flex-wrap gap-2 items-center">
-                <select
-                  value={row.ingredientId}
-                  onChange={(e) => updateIngredientRow(row.tempId, 'ingredientId', e.target.value)}
-                  className="flex-1 min-w-[120px] px-2.5 py-2 border border-slate-300 rounded-lg text-sm"
-                >
-                  <option value="">Select…</option>
-                  {(allIngredients ?? []).map((ing) => (
-                    <option key={ing.id} value={ing.id}>{ing.name}</option>
-                  ))}
-                </select>
+                <div className="flex-1 min-w-[120px]">
+                  <IngredientSelect
+                    ingredients={allIngredients ?? []}
+                    value={row.ingredientId}
+                    onChange={(id) => updateIngredientRow(row.tempId, 'ingredientId', id)}
+                    placeholder="Type to search…"
+                  />
+                </div>
                 <input
                   type="number"
                   step="any"
