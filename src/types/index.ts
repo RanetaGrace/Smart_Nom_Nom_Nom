@@ -146,7 +146,7 @@ export const COMMON_UNITS = [
   'ml', 'L', 'tsp', 'tbsp', 'cup',
   'piece', 'each', 'clove', 'slice',
   'can', 'bottle', 'package',
-  'with your heart',
+  'Serving', 'To Taste', 'With Your Heart',
 ] as const;
 
 export type Unit = typeof COMMON_UNITS[number] | string;
@@ -170,6 +170,9 @@ export const UNIT_TO_BASE: Record<string, { base: 'g' | 'ml' | 'piece'; factor: 
   can: { base: 'piece', factor: 1 },
   bottle: { base: 'piece', factor: 1 },
   package: { base: 'piece', factor: 1 },
+  Serving: { base: 'piece', factor: 1 },
+  'To Taste': { base: 'piece', factor: 1 },
+  'With Your Heart': { base: 'piece', factor: 1 },
 };
 
 // Inventory locations
