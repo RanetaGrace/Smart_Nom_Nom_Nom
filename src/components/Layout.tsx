@@ -1,4 +1,4 @@
-import { NavLink, Outlet } from 'react-router-dom';
+import { NavLink, Outlet, Link } from 'react-router-dom';
 
 const navItems = [
   { to: '/', label: 'Home', icon: '🏠', end: true },
@@ -17,9 +17,9 @@ export function Layout() {
           <h1 className="text-lg font-semibold text-slate-800 tracking-tight">
             Nom Noms
           </h1>
-          <span className="text-[10px] font-medium text-slate-400 uppercase tracking-wider">
-            Alpha 2.0
-          </span>
+          <Link to="/settings" className="text-lg text-slate-500 hover:text-slate-800 px-2 py-1" aria-label="Settings">
+            ⚙️
+          </Link>
         </div>
       </header>
 
