@@ -2,15 +2,22 @@ import { useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { format, parseISO } from 'date-fns';
-import { db, nextId } from '../db';
-import type { PlannedIngredient, Ingredient } from '../types';
-import { MEAL_TYPE_LABELS, COMMON_UNITS, INGREDIENT_TYPES } from '../types';
-import { convertQuantity } from '../utils/units';
+import { db } from '../db';
+import type { PlannedIngredient, InventoryBatch } from '../types';
+import { MEAL_TYPE_LABELS, COMMON_UNITS } from '../types';
+import { convertQuantity, formatQuantity } from '../utils/units';
 
-type EditableIng = PlannedIngredient & {
+type EditableIng = {
   tempId: string;
   useIt: boolean;
-  name?: string; // for display / free-text
+  quantity: number;
+  unit: string;
+  // formal ingredient
+  ingredientId?: string;
+  name: string;
+  // link to specific inventory batch when picked from inventory
+  batchId?: string;
+  isFromInventory?: boolean;
   isCustom?: boolean;
 };
 
@@ -28,17 +35,13 @@ export function MealDetail() {
   const [confirmMode, setConfirmMode] = useState<'eaten' | 'skipped' | null>(null);
   const [editableIngs, setEditableIngs] = useState<EditableIng[]>([]);
   const [saving, setSaving] = useState(false);
-
-  // Add custom ingredient in confirm
   const [showAddCustom, setShowAddCustom] = useState(false);
+  const [showPickInventory, setShowPickInventory] = useState(false);
   const [customName, setCustomName] = useState('');
   const [customQty, setCustomQty] = useState('1');
-  const [customUnit, setCustomUnit] = useState('g');
+  const [customUnit, setCustomUnit] = useState('Serving');
 
-  if (meal === undefined) {
-    return <p className="text-slate-500">Loading...</p>;
-  }
-
+  if (meal === undefined) return <p className="text-slate-500">Loading...</p>;
   if (!meal) {
     return (
       <div className="text-center py-12">
@@ -50,16 +53,24 @@ export function MealDetail() {
 
   const ingredientMap = new Map((ingredients ?? []).map((i) => [i.id, i]));
 
+  function batchLabel(b: InventoryBatch): string {
+    if (b.freeTextName) return b.freeTextName;
+    return ingredientMap.get(b.ingredientId || '')?.name ?? 'Unknown';
+  }
+
   function openConfirm(mode: 'eaten' | 'skipped') {
     setEditableIngs(
       meal!.ingredients.map((ing, i) => ({
-        ...ing,
         tempId: `c-${i}`,
         useIt: mode === 'eaten',
-        name: ingredientMap.get(ing.ingredientId)?.name,
+        quantity: ing.quantity,
+        unit: ing.unit,
+        ingredientId: ing.ingredientId,
+        name: ingredientMap.get(ing.ingredientId)?.name ?? 'Unknown',
       }))
     );
     setShowAddCustom(false);
+    setShowPickInventory(false);
     setConfirmMode(mode);
   }
 
@@ -75,10 +86,9 @@ export function MealDetail() {
       ...prev,
       {
         tempId: crypto.randomUUID(),
-        ingredientId: '', // will create or use free-text
+        useIt: true,
         quantity: parseFloat(customQty) || 1,
         unit: customUnit,
-        useIt: true,
         name: customName.trim(),
         isCustom: true,
       },
@@ -88,91 +98,82 @@ export function MealDetail() {
     setShowAddCustom(false);
   }
 
+  function pickFromInventory(batch: InventoryBatch) {
+    const name = batchLabel(batch);
+    setEditableIngs((prev) => [
+      ...prev,
+      {
+        tempId: crypto.randomUUID(),
+        useIt: true,
+        quantity: batch.quantity,
+        unit: batch.unit,
+        ingredientId: batch.ingredientId || undefined,
+        name,
+        batchId: batch.id,
+        isFromInventory: true,
+      },
+    ]);
+    setShowPickInventory(false);
+  }
+
   async function subtractFromInventory(ings: EditableIng[]) {
     const toUse = ings.filter((i) => i.useIt && i.quantity > 0);
     if (toUse.length === 0) return;
 
-    const allBatches = batches ?? [];
+    const allBatches = [...(batches ?? [])];
     const now = new Date().toISOString();
 
     for (const ing of toUse) {
-      // Custom items without ingredientId → create free-text inventory reduction
-      // by adding a negative-style note isn't ideal; instead create a free-text
-      // batch with 0 or just skip formal subtraction and log as free-text usage.
-      // Practical approach: if custom, create/find free-text and reduce or add usage note.
-      // For ALPHA: if no ingredientId, create a free-text inventory entry with the
-      // amount used as a "used" record isn't needed — we only subtract existing stock.
-      // So for custom items that weren't in inventory, we just record them as used
-      // by optionally creating a zero batch or skipping. Best: if custom, try to
-      // match free-text name in inventory and reduce; else skip subtraction.
+      let remaining = Number(ing.quantity);
 
-      if (ing.isCustom || !ing.ingredientId) {
-        // Try match free-text batches by name
-        const matching = allBatches
+      // Prefer specific batch if user picked one
+      let matching: InventoryBatch[] = [];
+      if (ing.batchId) {
+        const specific = allBatches.find((b) => b.id === ing.batchId);
+        if (specific) matching = [specific];
+      }
+
+      if (matching.length === 0 && ing.ingredientId) {
+        matching = allBatches
+          .filter((b) => b.ingredientId === ing.ingredientId && b.quantity > 0)
+          .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      }
+
+      if (matching.length === 0 && (ing.isCustom || ing.isFromInventory)) {
+        matching = allBatches
           .filter(
             (b) =>
               !b.ingredientId &&
-              (b.freeTextName || '').toLowerCase() === (ing.name || '').toLowerCase() &&
+              (b.freeTextName || '').toLowerCase() === ing.name.toLowerCase() &&
               b.quantity > 0
           )
           .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-
-        let remaining = Number(ing.quantity);
-        for (const batch of matching) {
-          if (remaining <= 0) break;
-          if (batch.unit !== ing.unit) {
-            const converted = convertQuantity(batch.quantity, batch.unit, ing.unit);
-            if (converted === null) continue;
-            if (converted <= remaining) {
-              remaining -= converted;
-              await db.inventoryBatches.delete(batch.id);
-            } else {
-              const used = convertQuantity(remaining, ing.unit, batch.unit);
-              if (used !== null) {
-                await db.inventoryBatches.update(batch.id, {
-                  quantity: batch.quantity - used,
-                  updatedAt: now,
-                });
-                remaining = 0;
-              }
-            }
-          } else {
-            if (batch.quantity <= remaining) {
-              remaining -= batch.quantity;
-              await db.inventoryBatches.delete(batch.id);
-            } else {
-              await db.inventoryBatches.update(batch.id, {
-                quantity: batch.quantity - remaining,
-                updatedAt: now,
-              });
-              remaining = 0;
-            }
-          }
-        }
-        continue;
       }
-
-      let remaining = Number(ing.quantity);
-      const unit = ing.unit;
-
-      const matching = allBatches
-        .filter((b) => b.ingredientId === ing.ingredientId && b.quantity > 0)
-        .sort((a, b) => a.createdAt.localeCompare(b.createdAt));
 
       for (const batch of matching) {
         if (remaining <= 0) break;
 
-        const availableInUnit = convertQuantity(batch.quantity, batch.unit, unit);
+        const availableInUnit =
+          batch.unit === ing.unit
+            ? batch.quantity
+            : convertQuantity(batch.quantity, batch.unit, ing.unit);
+
         if (availableInUnit === null) continue;
 
-        if (availableInUnit <= remaining) {
+        if (availableInUnit <= remaining + 0.0001) {
           remaining -= availableInUnit;
           await db.inventoryBatches.delete(batch.id);
+          // remove from local copy so we don't reuse
+          const idx = allBatches.findIndex((b) => b.id === batch.id);
+          if (idx >= 0) allBatches.splice(idx, 1);
         } else {
-          const usedInBatchUnit = convertQuantity(remaining, unit, batch.unit);
+          const usedInBatchUnit =
+            batch.unit === ing.unit
+              ? remaining
+              : convertQuantity(remaining, ing.unit, batch.unit);
           if (usedInBatchUnit !== null) {
             await db.inventoryBatches.update(batch.id, {
-              quantity: batch.quantity - usedInBatchUnit,
+              quantity: Math.max(0, batch.quantity - usedInBatchUnit),
               updatedAt: now,
             });
             remaining = 0;
@@ -221,6 +222,8 @@ export function MealDetail() {
     navigate('/meal-plan');
   }
 
+  const availableBatches = (batches ?? []).filter((b) => b.quantity > 0);
+
   return (
     <div className="space-y-5">
       <div className="flex items-start justify-between gap-3">
@@ -254,18 +257,10 @@ export function MealDetail() {
 
       {meal.status !== 'eaten' && meal.status !== 'skipped' && (
         <div className="flex gap-3">
-          <button
-            type="button"
-            onClick={() => openConfirm('eaten')}
-            className="flex-1 py-3 bg-emerald-600 text-white font-medium rounded-xl"
-          >
+          <button type="button" onClick={() => openConfirm('eaten')} className="flex-1 py-3 bg-emerald-600 text-white font-medium rounded-xl">
             ✓ I ate this
           </button>
-          <button
-            type="button"
-            onClick={() => openConfirm('skipped')}
-            className="flex-1 py-3 bg-slate-200 text-slate-700 font-medium rounded-xl"
-          >
+          <button type="button" onClick={() => openConfirm('skipped')} className="flex-1 py-3 bg-slate-200 text-slate-700 font-medium rounded-xl">
             ✕ Didn’t eat
           </button>
         </div>
@@ -300,11 +295,9 @@ export function MealDetail() {
         Remove from Meal Plan
       </button>
 
-      {/* Centered modal that fits the screen */}
       {confirmMode && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50">
           <div className="bg-white w-full max-w-sm rounded-2xl shadow-xl flex flex-col max-h-[85vh]">
-            {/* Header */}
             <div className="flex items-center justify-between px-4 py-3 border-b border-slate-100 shrink-0">
               <h3 className="font-semibold text-slate-800 text-base">
                 {confirmMode === 'eaten' ? 'What did you use?' : 'Anything used?'}
@@ -312,7 +305,7 @@ export function MealDetail() {
               <button
                 type="button"
                 onClick={() => setConfirmMode(null)}
-                className="w-9 h-9 flex items-center justify-center text-slate-500 hover:bg-slate-100 rounded-full text-xl leading-none"
+                className="w-9 h-9 flex items-center justify-center text-slate-500 rounded-full text-xl"
                 aria-label="Close"
               >
                 ×
@@ -320,63 +313,86 @@ export function MealDetail() {
             </div>
 
             <div className="px-4 pt-2 pb-1 text-sm text-slate-600 shrink-0">
-              {confirmMode === 'eaten'
-                ? 'Adjust amounts. Add anything else you ate. Inventory will update.'
-                : 'Log what you used, or NA if you ate out / skipped.'}
+              Adjust amounts, pick from inventory (including leftovers), or add something else.
             </div>
 
-            {/* Scrollable list */}
             <div className="flex-1 overflow-y-auto px-4 py-2 space-y-2 min-h-0">
-              {editableIngs.length === 0 && !showAddCustom && (
-                <p className="text-sm text-slate-500 py-3 text-center">No ingredients yet.</p>
-              )}
-              {editableIngs.map((row) => {
-                const name = row.name || ingredientMap.get(row.ingredientId)?.name || 'Item';
-                return (
-                  <div key={row.tempId} className="flex items-start gap-2 p-2.5 bg-slate-50 rounded-xl">
-                    <input
-                      type="checkbox"
-                      checked={row.useIt}
-                      onChange={(e) => updateEditable(row.tempId, 'useIt', e.target.checked)}
-                      className="mt-1 rounded text-emerald-600 w-5 h-5"
-                    />
-                    <div className="flex-1 min-w-0">
-                      <div className="text-sm font-medium text-slate-800 truncate">{name}</div>
-                      <div className="flex gap-2 mt-1.5">
-                        <input
-                          type="number"
-                          step="any"
-                          min="0"
-                          value={row.quantity}
-                          onChange={(e) => updateEditable(row.tempId, 'quantity', e.target.value)}
-                          disabled={!row.useIt}
-                          className="w-20 px-2 py-1.5 border border-slate-300 rounded-lg text-sm disabled:opacity-40"
-                        />
-                        <select
-                          value={row.unit}
-                          onChange={(e) => updateEditable(row.tempId, 'unit', e.target.value)}
-                          disabled={!row.useIt}
-                          className="px-2 py-1.5 border border-slate-300 rounded-lg text-sm disabled:opacity-40"
-                        >
-                          {COMMON_UNITS.map((u) => (
-                            <option key={u} value={u}>{u}</option>
-                          ))}
-                        </select>
-                      </div>
+              {editableIngs.map((row) => (
+                <div key={row.tempId} className="flex items-start gap-2 p-2.5 bg-slate-50 rounded-xl">
+                  <input
+                    type="checkbox"
+                    checked={row.useIt}
+                    onChange={(e) => updateEditable(row.tempId, 'useIt', e.target.checked)}
+                    className="mt-1 rounded text-emerald-600 w-5 h-5"
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="text-sm font-medium text-slate-800 truncate">
+                      {row.name}
+                      {row.isFromInventory && (
+                        <span className="ml-1 text-[10px] text-emerald-600">from inventory</span>
+                      )}
+                    </div>
+                    <div className="flex gap-2 mt-1.5">
+                      <input
+                        type="number"
+                        step="any"
+                        min="0"
+                        value={row.quantity}
+                        onChange={(e) => updateEditable(row.tempId, 'quantity', e.target.value)}
+                        disabled={!row.useIt}
+                        className="w-20 px-2 py-1.5 border border-slate-300 rounded-lg text-sm disabled:opacity-40"
+                      />
+                      <select
+                        value={row.unit}
+                        onChange={(e) => updateEditable(row.tempId, 'unit', e.target.value)}
+                        disabled={!row.useIt}
+                        className="px-2 py-1.5 border border-slate-300 rounded-lg text-sm disabled:opacity-40"
+                      >
+                        {COMMON_UNITS.map((u) => (
+                          <option key={u} value={u}>{u}</option>
+                        ))}
+                      </select>
                     </div>
                   </div>
-                );
-              })}
+                </div>
+              ))}
 
-              {/* Add custom */}
-              {showAddCustom ? (
+              {/* Pick from inventory */}
+              {showPickInventory ? (
+                <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl space-y-2">
+                  <div className="text-sm font-medium text-slate-800">Your inventory</div>
+                  {availableBatches.length === 0 ? (
+                    <p className="text-sm text-slate-500">Nothing in inventory.</p>
+                  ) : (
+                    <ul className="max-h-40 overflow-y-auto space-y-1">
+                      {availableBatches.map((b) => (
+                        <li key={b.id}>
+                          <button
+                            type="button"
+                            onClick={() => pickFromInventory(b)}
+                            className="w-full text-left px-2 py-2 text-sm rounded-lg hover:bg-emerald-50"
+                          >
+                            <span className="font-medium">{batchLabel(b)}</span>
+                            <span className="text-slate-500 ml-1">
+                              {formatQuantity(b.quantity, b.unit)} · {b.location}
+                            </span>
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                  <button type="button" onClick={() => setShowPickInventory(false)} className="text-sm text-slate-500">
+                    Cancel
+                  </button>
+                </div>
+              ) : showAddCustom ? (
                 <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-xl space-y-2">
-                  <div className="text-sm font-medium text-slate-800">Add what you ate</div>
+                  <div className="text-sm font-medium text-slate-800">Add something else</div>
                   <input
                     type="text"
                     value={customName}
                     onChange={(e) => setCustomName(e.target.value)}
-                    placeholder="e.g. Leftover pizza, Apple"
+                    placeholder="e.g. Leftover pizza"
                     className="w-full px-3 py-2 border border-slate-300 rounded-lg text-sm"
                   />
                   <div className="flex gap-2">
@@ -399,34 +415,34 @@ export function MealDetail() {
                     </select>
                   </div>
                   <div className="flex gap-2">
-                    <button
-                      type="button"
-                      onClick={addCustomToList}
-                      className="px-3 py-1.5 bg-emerald-600 text-white text-sm rounded-lg"
-                    >
+                    <button type="button" onClick={addCustomToList} className="px-3 py-1.5 bg-emerald-600 text-white text-sm rounded-lg">
                       Add
                     </button>
-                    <button
-                      type="button"
-                      onClick={() => setShowAddCustom(false)}
-                      className="px-3 py-1.5 text-sm text-slate-600"
-                    >
+                    <button type="button" onClick={() => setShowAddCustom(false)} className="px-3 py-1.5 text-sm text-slate-600">
                       Cancel
                     </button>
                   </div>
                 </div>
               ) : (
-                <button
-                  type="button"
-                  onClick={() => setShowAddCustom(true)}
-                  className="w-full py-2.5 text-sm font-medium text-emerald-600 border border-dashed border-emerald-300 rounded-xl"
-                >
-                  + Add something else you ate
-                </button>
+                <div className="flex flex-col gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowPickInventory(true)}
+                    className="w-full py-2.5 text-sm font-medium text-emerald-700 border border-emerald-300 rounded-xl"
+                  >
+                    + Pick from inventory
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowAddCustom(true)}
+                    className="w-full py-2.5 text-sm font-medium text-slate-600 border border-dashed border-slate-300 rounded-xl"
+                  >
+                    + Add something else you ate
+                  </button>
+                </div>
               )}
             </div>
 
-            {/* Footer */}
             <div className="px-4 py-3 border-t border-slate-100 space-y-2 shrink-0">
               <button
                 type="button"
@@ -446,11 +462,7 @@ export function MealDetail() {
                   NA – Ate out / Skipped
                 </button>
               )}
-              <button
-                type="button"
-                onClick={() => setConfirmMode(null)}
-                className="w-full py-2 text-sm text-slate-500"
-              >
+              <button type="button" onClick={() => setConfirmMode(null)} className="w-full py-2 text-sm text-slate-500">
                 Cancel
               </button>
             </div>
